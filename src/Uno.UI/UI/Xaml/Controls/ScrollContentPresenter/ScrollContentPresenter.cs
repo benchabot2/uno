@@ -48,8 +48,10 @@ namespace Windows.UI.Xaml.Controls
 
 #if XAMARIN
 		private NativeScrollContentPresenter Native => Content as NativeScrollContentPresenter;
+#if !__MACOS__
 		public ScrollBarVisibility HorizontalScrollBarVisibility => Native?.HorizontalScrollBarVisibility ?? default;
 		public ScrollBarVisibility VerticalScrollBarVisibility => Native?.VerticalScrollBarVisibility ?? default;
+#endif
 #endif
 
 		bool ILayoutConstraints.IsWidthConstrained(View requester)
@@ -80,15 +82,9 @@ namespace Windows.UI.Xaml.Controls
 #endif
 		}
 
-		public double ExtentHeight
-		{
-			get => Content is FrameworkElement fe ? fe.DesiredSize.Height : 0;
-		}
+		public double ExtentHeight => Content is FrameworkElement fe ? fe.DesiredSize.Height : 0;
 
-		public double ExtentWidth
-		{
-			get => Content is FrameworkElement fe ? fe.DesiredSize.Width : 0;
-		}
+		public double ExtentWidth => Content is FrameworkElement fe ? fe.DesiredSize.Width : 0;
 
 		public double ViewportHeight => DesiredSize.Height;
 

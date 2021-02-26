@@ -1,22 +1,21 @@
-﻿using Uno.Extensions;
-using Uno.Logging;
+﻿//#if UNO_HAS_MANAGED_SCROLL_PRESENTER
+using Uno.Extensions;
 using Uno.UI.DataBinding;
 using Windows.UI.Xaml.Data;
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using Uno.Disposables;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Windows.Foundation;
-using Windows.UI.Xaml.Media;
 using System.IO;
-using System.Numerics;
 using Windows.UI.Composition;
+using AppKit;
+using Uno.UI.Media;
 
 namespace Windows.UI.Xaml.Controls
 {
-	public partial class ScrollContentPresenter : ContentPresenter, ICustomClippingElement
+	public partial class ScrollContentPresenter : ContentPresenter, ICustomClippingElement, IScrollContentPresenter
 	{
 		// Default physical amount to scroll with Up/Down/Left/Right key
 		const double ScrollViewerLineDelta = 16.0;
@@ -73,6 +72,24 @@ namespace Windows.UI.Xaml.Controls
 		// an appropriate size.
 		const double ScrollViewerMinHeightToReflowAroundOcclusions = 32.0f;
 
+		private readonly IScrollStrategy _strategy;
+		private ManagedWeakReference _scroller;
+
+		public object ScrollOwner
+		{
+			get => _scroller.Target;
+			set
+			{
+				if (_scroller is { } oldScroller)
+				{
+					WeakReferencePool.ReturnWeakReference(this, oldScroller);
+				}
+
+				_scroller = WeakReferencePool.RentWeakReference(this, value);
+			}
+		}
+		private ScrollViewer Scroller => ScrollOwner as ScrollViewer;
+
 		public ScrollMode HorizontalScrollMode { get; set; }
 
 		public ScrollMode VerticalScrollMode { get; set; }
@@ -93,42 +110,158 @@ namespace Windows.UI.Xaml.Controls
 
 		public ScrollContentPresenter()
 		{
-			PointerWheelChanged += ScrollContentPresenter_PointerWheelChanged;
-			LayoutUpdated += ScrollContentPresenter_LayoutUpdated;
+#if __SKIA__
+			_strategy = CompositorScrollStrategy.Instance;
+#elif __MACOS__
+			_strategy = TransformScrollStrategy.Instance;
+#endif
 
-			// On Skia, the Scrolling is managed by the ScrollContentPresenter, not the ScrollViewer (as UWP).
+			_strategy.Initialize(this);
+
+			PointerWheelChanged += ScrollContentPresenter_PointerWheelChanged;
+
+			// On Skia and macOS (as UWP), the Scrolling is managed by the ScrollContentPresenter, not the ScrollViewer.
 			// Note: This as direct consequences in UIElement.GetTransform and VisualTreeHelper.SearchDownForTopMostElementAt
 			RegisterAsScrollPort(this);
 		}
 
 		public void SetVerticalOffset(double offset)
-		{
-			var extentHeight = ExtentHeight;
-			var viewportHeight = ViewportHeight;
-
-			var scrollY = ValidateInputOffset(offset, 0, extentHeight - viewportHeight);
-
-			if (!NumericExtensions.AreClose(VerticalOffset, scrollY))
-			{
-				VerticalOffset = scrollY;
-			}
-
-			UpdateTransform();
-		}
+			=> Set(verticalOffset: offset);
 
 		public void SetHorizontalOffset(double offset)
+			=> Set(horizontalOffset: offset);
+
+		/// <inheritdoc />
+		protected override void OnContentChanged(object oldValue, object newValue)
 		{
-			var extentWidth = ExtentWidth;
-			var viewportWidth = ViewportWidth;
-
-			var scrollX = ValidateInputOffset(offset, 0, extentWidth - viewportWidth);
-
-			if (!NumericExtensions.AreClose(HorizontalOffset, scrollX))
+			if (oldValue is UIElement oldElt)
 			{
-				HorizontalOffset = scrollX;
+				_strategy.Update(oldElt, 0, 0, 1, disableAnimation: true);
 			}
 
-			UpdateTransform();
+			base.OnContentChanged(oldValue, newValue);
+
+			if (newValue is UIElement newElt)
+			{
+				AddSubview(newElt);
+				_strategy.Update(newElt, HorizontalOffset, VerticalOffset, 1, disableAnimation: true);
+			}
+		}
+
+
+		// DUPLICATE WITH NETSTD
+
+		protected override Size MeasureOverride(Size size)
+		{
+			if (Content is UIElement child)
+			{
+				var slotSize = size;
+
+				if (VerticalScrollBarVisibility != ScrollBarVisibility.Disabled)
+				{
+					slotSize.Height = double.PositiveInfinity;
+				}
+				if (HorizontalScrollBarVisibility != ScrollBarVisibility.Disabled)
+				{
+					slotSize.Width = double.PositiveInfinity;
+				}
+
+				child.Measure(slotSize);
+
+				return new Size(
+					Math.Min(size.Width, child.DesiredSize.Width),
+					Math.Min(size.Height, child.DesiredSize.Height)
+				);
+			}
+
+			return new Size(0, 0);
+		}
+
+		protected override Size ArrangeOverride(Size finalSize)
+		{
+			if (Content is UIElement child)
+			{
+				var slotSize = finalSize;
+				var desiredChildSize = child.DesiredSize;
+
+				if (VerticalScrollBarVisibility != ScrollBarVisibility.Disabled)
+				{
+					slotSize.Height = Math.Max(desiredChildSize.Height, finalSize.Height);
+				}
+				if (HorizontalScrollBarVisibility != ScrollBarVisibility.Disabled)
+				{
+					slotSize.Width = Math.Max(desiredChildSize.Width, finalSize.Width);
+				}
+
+				child.Arrange(new Rect(new Point(0, 0), slotSize));
+			}
+
+			return finalSize;
+		}
+
+		internal override bool IsViewHit()
+		{
+			return true;
+		}
+
+		void IScrollContentPresenter.OnMinZoomFactorChanged(float newValue)
+		{
+			MinimumZoomScale = newValue;
+		}
+
+		void IScrollContentPresenter.OnMaxZoomFactorChanged(float newValue)
+		{
+			MaximumZoomScale = newValue;
+		}
+
+		// DUPLICATE WITH NETSTD
+
+		internal void Set(
+			double? horizontalOffset = null,
+			double? verticalOffset = null,
+			float? zoomFactor = null,
+			bool disableAnimation = true)
+		{
+			if (horizontalOffset is double hOffset)
+			{
+				var extentWidth = ExtentWidth;
+				var viewportWidth = ViewportWidth;
+				var scrollX = ValidateInputOffset(hOffset, 0, extentWidth - viewportWidth);
+
+				if (!NumericExtensions.AreClose(HorizontalOffset, scrollX))
+				{
+					HorizontalOffset = scrollX;
+				}
+			}
+
+			if (verticalOffset is double vOffset)
+			{
+				var extentHeight = ExtentHeight;
+				var viewportHeight = ViewportHeight;
+				var scrollY = ValidateInputOffset(vOffset, 0, extentHeight - viewportHeight);
+
+				if (!NumericExtensions.AreClose(VerticalOffset, scrollY))
+				{
+					VerticalOffset = scrollY;
+				}
+			}
+
+			Apply(disableAnimation: true);
+		}
+
+		private void Apply(bool disableAnimation)
+		{
+			if (Content is UIElement contentElt)
+			{
+				_strategy.Update(contentElt, HorizontalOffset, VerticalOffset, 1, disableAnimation);
+			}
+
+			Scroller?.OnScrollInternal(HorizontalOffset, VerticalOffset, isIntermediate: false);
+
+			// Note: We do not capture the offset so if they are altered in the OnScrollInternal,
+			//		 we will apply only the final ScrollOffsets and only once.
+			ScrollOffsets = new Point(HorizontalOffset, VerticalOffset);
+			InvalidateViewport();
 		}
 
 		// Ensure the offset we're scrolling to is valid.
@@ -140,41 +273,6 @@ namespace Windows.UI.Xaml.Controls
 			}
 
 			return Math.Max(minOffset, Math.Min(offset, maxOffset));
-		}
-
-		/// <inheritdoc />
-		protected override void OnContentChanged(object oldValue, object newValue)
-		{
-			if (oldValue is UIElement oldElt)
-			{
-				oldElt.Visual.AnchorPoint = Vector2.Zero;
-			}
-
-			base.OnContentChanged(oldValue, newValue);
-
-			if (newValue is UIElement newElt)
-			{
-				newElt.Visual.AnchorPoint = new Vector2((float)-HorizontalOffset, (float)-VerticalOffset);
-			}
-		}
-
-		private void UpdateTransform()
-		{
-			if (Content is UIElement c)
-			{
-				c.Visual.AnchorPoint = new Vector2((float) -HorizontalOffset, (float) -VerticalOffset);
-				//c.RenderTransform = new TranslateTransform() { X = -HorizontalOffset, Y = -VerticalOffset };
-			}
-
-			(TemplatedParent as ScrollViewer)?.OnScrollInternal(HorizontalOffset, VerticalOffset, false);
-
-			ScrollOffsets = new Point(HorizontalOffset, VerticalOffset);
-			InvalidateViewport();
-		}
-
-		private void ScrollContentPresenter_LayoutUpdated(object sender, object e)
-		{
-			Visual.Clip = Visual.Compositor.CreateInsetClip(0, 0, (float)RenderSize.Width, (float)RenderSize.Height);
 		}
 
 		private void ScrollContentPresenter_PointerWheelChanged(object sender, Input.PointerRoutedEventArgs e)
@@ -204,3 +302,4 @@ namespace Windows.UI.Xaml.Controls
 		bool ICustomClippingElement.ForceClippingToLayoutSlot => true; // force scrollviewer to always clip
 	}
 }
+//#endif
